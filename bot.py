@@ -9,124 +9,130 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 # --- CONFIGURACIÓN ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("TOKEN")
-MY_ID = int(os.getenv("MY_ID"))  # Tu ID numérico
+MY_ID = int(os.getenv("MY_ID"))
 PASSWORD_CORRECTA = "Carlos13mar"
 
-# Variables globales en memoria (puedes pasarlas a MongoDB después si quieres)
-config_spam = {
-    "link": "https://telegra.ph/Tu-Enlace-Aqui",
-    "intervalo": 600,  # 10 min por defecto
-    "fijar": False,
+config = {
+    "link_grupo": "Configura un link para grupos",
+    "link_privado": "Configura un link para privados",
+    "intervalo": 600,
     "autorizados": {MY_ID},
-    "tareas_activas": {} # {chat_id: task}
+    "tareas_activas": {} 
 }
 
-# --- SERVIDOR WEB (Para que Render no se apague) ---
+# --- SERVIDOR WEB ---
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        self.wfile.write(b"Bot Spam Activo")
+        self.wfile.write(b"Bot Operativo")
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
-    server.serve_forever()
+    HTTPServer(('0.0.0.0', port), SimpleHandler).serve_forever()
 
-# --- FUNCIONES DE SPAM ---
-async def tarea_spam(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+# --- LÓGICA DE ENVÍO ---
+async def bucle_spam(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     while True:
         try:
-            msg = await context.bot.send_message(
-                chat_id=chat_id, 
-                text=f"📢 **Aviso Oficial**\n\n{config_spam['link']}",
-                parse_mode="Markdown"
-            )
-            if config_spam["fijar"]:
-                await context.bot.pin_chat_message(chat_id, msg.message_id)
+            await context.bot.send_message(chat_id=chat_id, text=config["link_grupo"])
         except Exception as e:
-            logging.error(f"Error en spam: {e}")
-        
-        await asyncio.sleep(config_spam["intervalo"])
+            logging.error(f"Error en grupo {chat_id}: {e}")
+        await asyncio.sleep(config["intervalo"])
 
 # --- TECLADOS ---
-def teclado_config():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("10 Min", callback_data="t_600"), InlineKeyboardButton("20 Min", callback_data="t_1200")],
-        [InlineKeyboardButton("30 Min", callback_data="t_1800"), InlineKeyboardButton("1 Hora", callback_data="t_3600")],
-        [
-            InlineKeyboardButton("📌 Fijar: ON" if config_spam["fijar"] else "📌 Fijar: OFF", callback_data="toggle_pin")
-        ]
-    ])
+def menu_principal():
+    keyboard = [
+        [InlineKeyboardButton("Mensaje a grupo 👥", callback_data="menu_grupo")],
+        [InlineKeyboardButton("Mensaje privado 👤", callback_data="menu_privado")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def menu_grupo_config():
+    keyboard = [
+        [InlineKeyboardButton("Enviar Link 🔗", callback_data="set_link_g")],
+        [InlineKeyboardButton("Seleccionar Tiempo ⏱", callback_data="set_time")],
+        [InlineKeyboardButton("⬅️ Volver", callback_data="main")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def teclado_tiempos():
+    keyboard = [
+        [InlineKeyboardButton("10m", callback_data="t_600"), InlineKeyboardButton("20m", callback_data="t_1200")],
+        [InlineKeyboardButton("30m", callback_data="t_1800"), InlineKeyboardButton("1h", callback_data="t_3600")],
+        [InlineKeyboardButton("⬅️ Volver", callback_data="menu_grupo")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 # --- MANEJADORES ---
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    # Caso Privado: Configuración
-    if update.message.chat.type == "private":
-        if user_id in config_spam["autorizados"]:
-            await update.message.reply_text(
-                f"⚙️ **Panel de Control**\nLink actual: {config_spam['link']}\nIntervalo: {config_spam['intervalo']//60} min",
-                reply_markup=teclado_config()
-            )
+    # Respuesta a usuario RANDOM (Privado)
+    if update.message.chat.type == "private" and user_id not in config["autorizados"]:
+        await update.message.reply_text(config["link_privado"])
         return
 
-    # Caso Grupo: Iniciar Spam
-    if user_id in config_spam["autorizados"]:
-        if chat_id not in config_spam["tareas_activas"]:
-            # Crear tarea asíncrona para este grupo
-            task = asyncio.create_task(tarea_spam(context, chat_id))
-            config_spam["tareas_activas"][chat_id] = task
-            await update.message.reply_text("🚀 **Spam iniciado con éxito en este grupo.**")
-        else:
-            await update.message.reply_text("⚠️ Ya hay un ciclo de spam activo aquí.")
+    # Menú para el DUEÑO (Privado)
+    if update.message.chat.type == "private" and user_id in config["autorizados"]:
+        await update.message.reply_text("Panel de Administración:", reply_markup=menu_principal())
+        return
+
+    # Activación en GRUPO (Sin mensaje de confirmación)
+    if user_id in config["autorizados"] and chat_id not in config["tareas_activas"]:
+        task = asyncio.create_task(bucle_spam(context, chat_id))
+        config["tareas_activas"][chat_id] = task
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    # Si es la contraseña, autorizar
     if text == PASSWORD_CORRECTA:
-        config_spam["autorizados"].add(user_id)
-        await update.message.reply_text("✅ Acceso concedido. Ahora puedes mandarme el LINK o usar /start.")
+        config["autorizados"].add(user_id)
+        await update.message.reply_text("✅ Acceso admin activado.", reply_markup=menu_principal())
         return
 
-    # Si está autorizado y manda un link por privado
-    if user_id in config_spam["autorizados"] and update.message.chat.type == "private":
-        if "http" in text:
-            config_spam["link"] = text
-            await update.message.reply_text(f"🔗 Link actualizado a:\n{text}")
+    if user_id in config["autorizados"] and update.message.chat.type == "private":
+        state = context.user_data.get("state")
+        if state == "waiting_link_g":
+            config["link_grupo"] = text
+            await update.message.reply_text(f"✅ Link de GRUPO actualizado.", reply_markup=menu_grupo_config())
+        elif state == "waiting_link_p":
+            config["link_privado"] = text
+            await update.message.reply_text(f"✅ Link de PRIVADO actualizado.", reply_markup=menu_principal())
+        context.user_data["state"] = None
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    if query.from_user.id not in config_spam["autorizados"]:
-        return
+    if query.from_user.id not in config["autorizados"]: return
 
-    data = query.data
-    if data.startswith("t_"):
-        config_spam["intervalo"] = int(data.split("_")[1])
-    elif data == "toggle_pin":
-        config_spam["fijar"] = not config_spam["fijar"]
-
-    await query.edit_message_text(
-        f"⚙️ **Configuración Actualizada**\nLink: {config_spam['link']}\nIntervalo: {config_spam['intervalo']//60} min\nFijar: {'SI' if config_spam['fijar'] else 'NO'}",
-        reply_markup=teclado_config()
-    )
+    if query.data == "main":
+        await query.edit_message_text("Panel de Administración:", reply_markup=menu_principal())
+    elif query.data == "menu_grupo":
+        await query.edit_message_text(f"Configuración de Grupos\nLink actual: {config['link_grupo']}", reply_markup=menu_grupo_config())
+    elif query.data == "menu_privado":
+        await query.edit_message_text("Configuración de Privados\nUsa el botón para cambiar el link que verán los usuarios random.", 
+                                      reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Enviar Link 🔗", callback_data="set_link_p")], [InlineKeyboardButton("⬅️ Volver", callback_data="main")]]))
+    elif query.data == "set_link_g":
+        context.user_data["state"] = "waiting_link_g"
+        await query.edit_message_text("Envíame el nuevo link para los GRUPOS:")
+    elif query.data == "set_link_p":
+        context.user_data["state"] = "waiting_link_p"
+        await query.edit_message_text("Envíame el nuevo link para los PRIVADOS (usuarios random):")
+    elif query.data == "set_time":
+        await query.edit_message_text("Selecciona el intervalo de tiempo:", reply_markup=teclado_tiempos())
+    elif query.data.startswith("t_"):
+        config["intervalo"] = int(query.data.split("_")[1])
+        await query.edit_message_text(f"✅ Tiempo actualizado a {config['intervalo']//60} min.", reply_markup=menu_grupo_config())
 
 def main():
-    # Iniciar servidor web en un hilo aparte
     threading.Thread(target=run_web_server, daemon=True).start()
-
-    # Configurar la Aplicación de Telegram
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
     app.run_polling()
 
 if __name__ == '__main__':
