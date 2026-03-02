@@ -1,85 +1,133 @@
-import telebot
-from telebot import types
+import os
+import logging
 import threading
-import time
+import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-API_TOKEN = 'TU_TOKEN_AQUI'
-bot = telebot.TeleBot(API_TOKEN)
+# --- CONFIGURACIÓN ---
+logging.basicConfig(level=logging.INFO)
+TOKEN = os.getenv("TOKEN")
+MY_ID = int(os.getenv("MY_ID"))  # Tu ID numérico
+PASSWORD_CORRECTA = "Carlos13mar"
 
-# Variables de control
-PASSWORD = "Carlos13mar"
-authorized_users = set()
-target_link = "Esperando link..."
-repeat_time = 600 # 10 min por defecto
-pin_enabled = False
-running_groups = {} # {group_id: threading.Event}
+# Variables globales en memoria (puedes pasarlas a MongoDB después si quieres)
+config_spam = {
+    "link": "https://telegra.ph/Tu-Enlace-Aqui",
+    "intervalo": 600,  # 10 min por defecto
+    "fijar": False,
+    "autorizados": {MY_ID},
+    "tareas_activas": {} # {chat_id: task}
+}
 
-def auto_send_task(chat_id, stop_event):
-    while not stop_event.is_set():
-        msg = bot.send_message(chat_id, f"📢 Enlace oficial:\n{target_link}")
-        if pin_enabled:
-            try:
-                bot.pin_chat_message(chat_id, msg.message_id)
-            except:
-                pass
-        time.sleep(repeat_time)
+# --- SERVIDOR WEB (Para que Render no se apague) ---
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers()
+        self.wfile.write(b"Bot Spam Activo")
 
-@bot.message_handler(func=lambda message: message.chat.type == 'private')
-def private_handler(message):
-    # Validar contraseña
-    if message.text == PASSWORD:
-        authorized_users.add(message.from_user.id)
-        bot.reply_to(message, "✅ Acceso concedido. Envíame el LINK que quieres promocionar.")
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    server.serve_forever()
+
+# --- FUNCIONES DE SPAM ---
+async def tarea_spam(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    while True:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=chat_id, 
+                text=f"📢 **Aviso Oficial**\n\n{config_spam['link']}",
+                parse_mode="Markdown"
+            )
+            if config_spam["fijar"]:
+                await context.bot.pin_chat_message(chat_id, msg.message_id)
+        except Exception as e:
+            logging.error(f"Error en spam: {e}")
+        
+        await asyncio.sleep(config_spam["intervalo"])
+
+# --- TECLADOS ---
+def teclado_config():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("10 Min", callback_data="t_600"), InlineKeyboardButton("20 Min", callback_data="t_1200")],
+        [InlineKeyboardButton("30 Min", callback_data="t_1800"), InlineKeyboardButton("1 Hora", callback_data="t_3600")],
+        [
+            InlineKeyboardButton("📌 Fijar: ON" if config_spam["fijar"] else "📌 Fijar: OFF", callback_data="toggle_pin")
+        ]
+    ])
+
+# --- MANEJADORES ---
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # Caso Privado: Configuración
+    if update.message.chat.type == "private":
+        if user_id in config_spam["autorizados"]:
+            await update.message.reply_text(
+                f"⚙️ **Panel de Control**\nLink actual: {config_spam['link']}\nIntervalo: {config_spam['intervalo']//60} min",
+                reply_markup=teclado_config()
+            )
         return
 
-    if message.from_user.id not in authorized_users:
-        return # No responde nada si no hay contraseña
+    # Caso Grupo: Iniciar Spam
+    if user_id in config_spam["autorizados"]:
+        if chat_id not in config_spam["tareas_activas"]:
+            # Crear tarea asíncrona para este grupo
+            task = asyncio.create_task(tarea_spam(context, chat_id))
+            config_spam["tareas_activas"][chat_id] = task
+            await update.message.reply_text("🚀 **Spam iniciado con éxito en este grupo.**")
+        else:
+            await update.message.reply_text("⚠️ Ya hay un ciclo de spam activo aquí.")
 
-    # Si es usuario autorizado y manda un link
-    if "http" in message.text:
-        global target_link
-        target_link = message.text
-        bot.reply_to(message, f"🔗 Link actualizado a: {target_link}\nUsa /start para ver el menú de configuración.")
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+
+    # Si es la contraseña, autorizar
+    if text == PASSWORD_CORRECTA:
+        config_spam["autorizados"].add(user_id)
+        await update.message.reply_text("✅ Acceso concedido. Ahora puedes mandarme el LINK o usar /start.")
+        return
+
+    # Si está autorizado y manda un link por privado
+    if user_id in config_spam["autorizados"] and update.message.chat.type == "private":
+        if "http" in text:
+            config_spam["link"] = text
+            await update.message.reply_text(f"🔗 Link actualizado a:\n{text}")
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    elif message.text == "/start":
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        btn1 = types.InlineKeyboardButton("10 min", callback_data="t_600")
-        btn2 = types.InlineKeyboardButton("20 min", callback_data="t_1200")
-        btn3 = types.InlineKeyboardButton("30 min", callback_data="t_1800")
-        btn4 = types.InlineKeyboardButton("1h", callback_data="t_3600")
-        btn5 = types.InlineKeyboardButton("Fijar: ON", callback_data="pin_on")
-        btn6 = types.InlineKeyboardButton("Fijar: OFF", callback_data="pin_off")
-        markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
-        bot.send_message(message.chat.id, f"⚙️ Configuración actual:\nLink: {target_link}\nIntervalo: {repeat_time/60}min\nFijar: {pin_enabled}", reply_markup=markup)
+    if query.from_user.id not in config_spam["autorizados"]:
+        return
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    global repeat_time, pin_enabled
-    if call.data.startswith("t_"):
-        repeat_time = int(call.data.split("_")[1])
-        bot.answer_callback_query(call.id, f"Tiempo cambiado a {repeat_time/60} min")
-    elif call.data == "pin_on":
-        pin_enabled = True
-        bot.answer_callback_query(call.id, "Fijado activado")
-    elif call.data == "pin_off":
-        pin_enabled = False
-        bot.answer_callback_query(call.id, "Fijado desactivado")
+    data = query.data
+    if data.startswith("t_"):
+        config_spam["intervalo"] = int(data.split("_")[1])
+    elif data == "toggle_pin":
+        config_spam["fijar"] = not config_spam["fijar"]
 
-@bot.message_handler(commands=['start'])
-def group_start(message):
-    if message.chat.type in ['group', 'supergroup']:
-        if message.from_user.id not in authorized_users:
-            return
-        
-        chat_id = message.chat.id
-        if chat_id in running_groups:
-            bot.send_message(chat_id, "⚠️ El bot ya está corriendo en este grupo.")
-            return
+    await query.edit_message_text(
+        f"⚙️ **Configuración Actualizada**\nLink: {config_spam['link']}\nIntervalo: {config_spam['intervalo']//60} min\nFijar: {'SI' if config_spam['fijar'] else 'NO'}",
+        reply_markup=teclado_config()
+    )
 
-        stop_event = threading.Event()
-        running_groups[chat_id] = stop_event
-        thread = threading.Thread(target=auto_send_task, args=(chat_id, stop_event))
-        thread.start()
-        bot.send_message(chat_id, f"🚀 Promoción iniciada cada {repeat_time/60} min.")
+def main():
+    # Iniciar servidor web en un hilo aparte
+    threading.Thread(target=run_web_server, daemon=True).start()
 
-bot.infinity_polling()
+    # Configurar la Aplicación de Telegram
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
